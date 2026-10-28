@@ -1,0 +1,19 @@
+[project]
+name = "audio-splitter-master"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "albimazzu-blackshire", email = "alberto.mazzucchelli@black-shire.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "tqdm==4.66.1",
+]
+
+[project.scripts]
+audio-splitter-master = "audio_splitter_master:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"

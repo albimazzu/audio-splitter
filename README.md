@@ -1,37 +1,39 @@
-# Audio (.m4a) Splitter
+# Audio Bookmark Splitter
 
-A simple Python script to split audio files (especially .m4a) into smaller parts. Perfect for breaking down long recordings into manageable chunks.
+Split one audio file into one output file per bookmark in a SABP XML file. Each output is named with the bookmark title.
 
 ## Prerequisites
-- Python 3.11.2 (or similar version)
-- ffmpeg and ffprobe executables (included in repository as .zip files)
+- Python 3.11.2 or newer
+- `ffmpeg.exe` and `ffprobe.exe` in the project directory
 
 ## Setup
-1. Extract `ffmpeg.zip` and `ffprobe.zip` into the project directory
-2. Install required Python packages:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if it is not already available, then create the project environment and install dependencies:
 ```
-   pip install -r requirements.txt
+   uv sync
 ```
+This creates a `.venv` environment from `pyproject.toml` and `uv.lock`.
 
 ## How to Use
-1. Open `audio_splitter_final.py` in a text editor
-2. Update the `directory` and `filename` variables in the script:
-```python
-   directory = "your/audio/file/directory/"
-   filename = "your_audio_file.m4a"
+Run the script with `uv run`. By default, it looks for `bookmarks.sabp.xml` beside the audio and saves the split files in that same folder:
 ```
-3. (Optional) Change `part_length_minutes` in the `split_audio()` call to adjust chunk size (default is 15 minutes)
-4. Run the script:
+   uv run python audio_splitter_final.py "path\to\file.m4a"
 ```
-   python audio_splitter_final.py
+You can specify a different bookmark file or output folder:
 ```
-5. Split files will be saved in the same directory as the original file
+   uv run python audio_splitter_final.py "path\to\file.m4a" --bookmarks "path\to\bookmarks.sabp.xml" --output "path\to\output\split"
+```
+To convert the split files to MP3, add `--format mp3` (or `--output-format mp3`):
+```
+   uv run python audio_splitter_final.py "path\to\file.m4a" --format mp3
+```
 
 ## Features
-- Splits audio files into equal-length parts (default: 15 minutes each)
-- Preserves original filename with part numbering
+- Splits at the bookmark positions, using each title for its output filename
+- Interprets `filePosition` as seconds
+- Includes any audio before the first bookmark in the first output; the last output runs to the end of the source
+- Keeps the source format by default; `--format mp3` converts each segment to MP3
+- Supports common audio formats supported by FFmpeg (m4a, mp3, wav, etc.)
 - Shows progress bar during processing
-- Supports various audio formats (m4a, mp3, wav, etc.)
 
 ## Tested On
 Python 3.11.2

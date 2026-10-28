@@ -1,1 +1,4 @@
 *.exe
+__pycache__/
+.venv/
+I classici disney/

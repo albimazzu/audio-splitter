@@ -1,71 +1,167 @@
+import argparse
 import math
 import os
-from pydub import AudioSegment
+import re
+import subprocess
+import xml.etree.ElementTree as ET
+
 from tqdm import tqdm
 
-# Set ffmpeg paths to local executables
-AudioSegment.converter = os.path.join(os.getcwd(), "ffmpeg.exe")
-AudioSegment.ffmpeg = os.path.join(os.getcwd(), "ffmpeg.exe")
-AudioSegment.ffprobe = os.path.join(os.getcwd(), "ffprobe.exe")
+
+FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe")
+FFPROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffprobe.exe")
 
 
-def split_audio(input_file: str, output_folder: str, part_length_minutes: int = 15):
-    # Get original filename without extension
-    original_filename = os.path.splitext(os.path.basename(input_file))[0]
-    file_ext = input_file.split(".")[-1].lower()
+def load_bookmarks(bookmarks_file: str) -> list[tuple[str, int]]:
+    root = ET.parse(bookmarks_file).getroot()
+    bookmarks = []
 
-    print("🎵 Loading audio file...")
-    # Load the audio file
-    audio = AudioSegment.from_file(input_file, format=file_ext)
+    for bookmark in root.findall(".//bookmark"):
+        title = (bookmark.findtext("title") or "").strip()
+        position_text = bookmark.findtext("filePosition")
+        if not position_text:
+            raise ValueError("A bookmark is missing its filePosition.")
 
-    # Convert minutes to milliseconds
-    part_length_ms = part_length_minutes * 60 * 1000
-    total_length_ms = len(audio)
+        try:
+            position_seconds = float(position_text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid bookmark position: {position_text!r}") from exc
 
-    # Calculate number of parts
-    num_parts = math.ceil(total_length_ms / part_length_ms)
+        if not math.isfinite(position_seconds) or position_seconds < 0:
+            raise ValueError(f"Invalid bookmark position: {position_text!r}")
 
-    # Ensure output folder exists
-    os.makedirs(output_folder, exist_ok=True)
+        bookmarks.append((title, round(position_seconds * 1000)))
 
-    print(f"📂 Splitting into {num_parts} parts...")
+    if not bookmarks:
+        raise ValueError(f"No bookmarks found in '{bookmarks_file}'.")
 
-    # Split and export with progress bar
-    for i in tqdm(range(num_parts), desc="Processing parts", unit="part"):
-        start_time = i * part_length_ms
-        end_time = min((i + 1) * part_length_ms, total_length_ms)
-        part = audio[start_time:end_time]
+    bookmarks.sort(key=lambda item: item[1])
+    for previous, current in zip(bookmarks, bookmarks[1:]):
+        if current[1] <= previous[1]:
+            raise ValueError("Bookmark positions must be unique.")
 
-        # Use original filename with part suffix
-        part_filename = f"{original_filename}_part_{i + 1:02d}.{file_ext}"
-        output_path = os.path.join(output_folder, part_filename)
+    return bookmarks
 
-        # Use mp4 format for m4a files (ffmpeg compatibility)
-        export_format = "mp4" if file_ext == "m4a" else file_ext
-        part.export(
-            output_path,
-            format=export_format,
-            codec="aac" if file_ext == "m4a" else None,
+
+def safe_filename(title: str, index: int) -> str:
+    safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")
+    if not safe_title:
+        safe_title = f"bookmark_{index:02d}"
+    return f"{index:02d} - {safe_title}"
+
+
+def split_audio(
+    input_file: str,
+    output_folder: str,
+    bookmarks_file: str | None = None,
+    output_format: str | None = None,
+) -> None:
+    input_file = os.path.abspath(input_file)
+    if bookmarks_file is None:
+        bookmarks_file = os.path.join(
+            os.path.dirname(input_file), "bookmarks.sabp.xml"
         )
 
-    print(f"\n🎧 Done! Created {num_parts} parts in '{output_folder}'")
-    print(
-        f"📝 Files named: {original_filename}_part_01.{file_ext}, {original_filename}_part_02.{file_ext}, etc."
+    if not os.path.isfile(input_file):
+        raise FileNotFoundError(f"Audio file not found: '{input_file}'.")
+    if not os.path.isfile(bookmarks_file):
+        raise FileNotFoundError(f"Bookmark file not found: '{bookmarks_file}'.")
+
+    bookmarks = load_bookmarks(bookmarks_file)
+    file_ext = os.path.splitext(input_file)[1].lstrip(".").lower()
+    if not file_ext:
+        raise ValueError("The audio file must have an extension.")
+    output_ext = (output_format or file_ext).lower().lstrip(".")
+    if output_ext != "mp3" and output_format is not None:
+        raise ValueError("The only supported output format override is 'mp3'.")
+
+    probe = subprocess.run(
+        [
+            FFPROBE_PATH,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            input_file,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    duration_ms = round(float(probe.stdout.strip()) * 1000)
+
+    if bookmarks[0][1] >= duration_ms:
+        raise ValueError("The first bookmark is at or beyond the end of the audio.")
+    if any(position >= duration_ms for _, position in bookmarks):
+        raise ValueError("A bookmark is at or beyond the end of the audio.")
+
+    os.makedirs(output_folder, exist_ok=True)
+    print(f"Splitting audio into {len(bookmarks)} bookmark-based files...")
+
+    for index, (title, bookmark_position_ms) in enumerate(
+        tqdm(bookmarks, desc="Processing bookmarks", unit="file"), start=1
+    ):
+        end_ms = (
+            bookmarks[index][1] if index < len(bookmarks) else duration_ms
+        )
+        start_ms = 0 if index == 1 else bookmark_position_ms
+        output_filename = f"{safe_filename(title, index)}.{output_ext}"
+        output_path = os.path.join(output_folder, output_filename)
+        start_seconds = start_ms / 1000
+        length_seconds = (end_ms - start_ms) / 1000
+
+        command = [
+            FFMPEG_PATH,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{start_seconds:.3f}",
+            "-i",
+            input_file,
+            "-t",
+            f"{length_seconds:.3f}",
+            "-vn",
+        ]
+        if output_ext == "mp3":
+            command.extend(["-c:a", "libmp3lame"])
+        command.append(output_path)
+        subprocess.run(command, check=True)
+
+    print(f"\nDone! Created {len(bookmarks)} files in '{output_folder}'.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Split an audio file at the positions in a SABP bookmark XML."
+    )
+    parser.add_argument("input_file", help="Path to the source audio file.")
+    parser.add_argument(
+        "--bookmarks",
+        help="Path to bookmarks.sabp.xml (defaults to that file beside the audio).",
+    )
+    parser.add_argument(
+        "--output",
+        help="Output folder (defaults to the source audio folder).",
+    )
+    parser.add_argument(
+        "--format",
+        "--output-format",
+        dest="output_format",
+        choices=["mp3"],
+        help="Output format (defaults to the source audio format).",
+    )
+    args = parser.parse_args()
+
+    output_folder = args.output or os.path.dirname(os.path.abspath(args.input_file))
+    split_audio(
+        args.input_file, output_folder, args.bookmarks, args.output_format
     )
 
 
 if __name__ == "__main__":
-    directory = "G:\\Folder Name\\Another Folder Name\\"
-    filename = "filename.m4a"
-
-    # Check if file exists first
-    full_path = os.path.join(directory, filename)
-    if os.path.exists(full_path):
-        print(f"🎵 Processing: {filename}")
-        split_audio(full_path, directory)
-    else:
-        print(f"❌ File not found: {full_path}")
-        print("Please check the path and filename.")
-        print("\n📁 Current directory files:")
-        for file in os.listdir("."):
-            print(f"  - {file}")
+    main()
